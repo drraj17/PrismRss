@@ -1,14 +1,18 @@
-const CACHE_NAME = 'prismrss-pwa-v3';
+const CACHE_NAME = 'prismrss-pwa-v7';
 const APP_SHELL = [
   './',
   './index.html',
   './manifest.json',
-  './icon.svg'
+  './icon.svg',
+  './icon-192.png',
+  './icon-512.png'
 ];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL))
+    caches.open(CACHE_NAME).then((cache) =>
+      Promise.allSettled(APP_SHELL.map((url) => cache.add(url)))
+    )
   );
   self.skipWaiting();
 });
@@ -31,7 +35,6 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(event.request.url);
 
-  // Cache-first for same-origin app shell files (index.html, manifest.json, icon.svg)
   if (url.origin === self.location.origin) {
     event.respondWith(
       caches.match(event.request).then((cached) => {
@@ -51,7 +54,6 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Network-first with cache fallback for CDN assets & fonts
   event.respondWith(
     fetch(event.request)
       .then((response) => {
