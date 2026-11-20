@@ -1,4 +1,3 @@
-```html
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -461,15 +460,12 @@
                     <img id="reader-image" src="" alt="" class="w-full h-full max-h-80 object-cover" onerror="document.getElementById('reader-image-wrap').classList.add('hidden')">
                 </div>
 
-                <div id="reader-ai-bar" class="flex flex-wrap items-center justify-between gap-2 p-3 rounded-2xl bg-gradient-to-r from-violet-500/10 via-fuchsia-500/10 to-indigo-500/10 border border-violet-300/40 dark:border-violet-700/40">
-                    <div class="flex items-center gap-2 text-xs min-w-0 flex-1">
-                        <i class="ph-fill ph-sparkle text-fuchsia-500 text-base shrink-0"></i>
-                        <span id="reader-ai-status" class="font-semibold text-slate-700 dark:text-slate-200 safe-wrap">Want a deeper summary from the linked webpage?</span>
-                    </div>
-                    <button type="button" onclick="summarizeCurrentLinkWithGemini()" id="btn-reader-ai-summarize" class="px-3 py-1.5 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-white text-xs font-bold shadow-xs transition active:scale-95 flex items-center gap-1.5 shrink-0">
+                <div id="reader-ai-bar" class="flex flex-wrap items-center justify-between gap-2">
+                    <button type="button" onclick="summarizeCurrentLinkWithGemini()" id="btn-reader-ai-summarize" class="px-3.5 py-2 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-white text-xs font-bold shadow-xs transition active:scale-95 flex items-center gap-1.5 shrink-0">
                         <i class="ph-bold ph-magic-wand"></i>
-                        <span>Summarize Full Link with API Key</span>
+                        <span>Show AI Summary</span>
                     </button>
+                    <span id="reader-ai-status" class="hidden text-xs font-semibold text-rose-600 dark:text-rose-400 safe-wrap"></span>
                 </div>
 
                 <div id="reader-highlights-box" class="p-4 rounded-2xl bg-amber-50/80 dark:bg-amber-950/30 border border-amber-200/70 dark:border-amber-800/50 space-y-2">
@@ -635,12 +631,12 @@
                     <div class="flex items-center justify-between">
                         <h3 class="text-xs font-extrabold uppercase tracking-wider text-violet-700 dark:text-violet-300 flex items-center gap-1.5">
                             <i class="ph-fill ph-key text-sm"></i>
-                            <span>Gemini API Key (Link Summaries & RSS Finder)</span>
+                            <span>Gemini API Key (AI Summaries & RSS Finder)</span>
                         </h3>
                         <span id="api-key-status-badge" class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300">Not Set</span>
                     </div>
                     <p class="text-[11px] text-slate-500 dark:text-slate-400">
-                        Stored locally in your browser to summarize link-only posts and discover RSS feeds. Auto-saves as you paste or click Test/Save.
+                        Stored locally in your browser. Auto-saves as you paste or click Test/Save.
                     </p>
                     <div class="flex flex-wrap items-center gap-2">
                         <input type="password" id="gemini-api-key-input" oninput="handleApiKeyLiveInput(this.value)" placeholder="Paste AIzaSy... Gemini API Key" class="flex-1 min-w-[180px] px-3 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-violet-500">
@@ -1827,21 +1823,13 @@
 
                 const keyToUse = (state.apiKey || '').trim();
                 if (keyToUse) {
-                    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${encodeURIComponent(keyToUse)}`;
-                    const gRes = await fetch(geminiUrl, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            contents: [{ parts: [{ text: `Find the working official RSS or Atom feed URL for the website: ${normalized}. Reply ONLY with the raw https:// URL and nothing else.` }] }],
-                            tools: [{ google_search: {} }]
-                        })
-                    });
-                    if (gRes.ok) {
-                        const gData = await gRes.json();
-                        const txt = gData?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-                        const match = txt.match(/https?:\/\/[^\s"'<>]+/i);
-                        if (match) return match[0].replace(/[).,]+$/, '');
-                    }
+                    const txt = await callGeminiWithFallback(
+                        keyToUse,
+                        `Find the working official RSS or Atom feed URL for the website: ${normalized}. Reply ONLY with the raw https:// URL and nothing else.`,
+                        true
+                    );
+                    const match = txt.match(/https?:\/\/[^\s"'<>]+/i);
+                    if (match) return match[0].replace(/[).,]+$/, '');
                 }
             } catch (_) {}
 
@@ -2971,7 +2959,6 @@
                 if (pointsMatch || commentsMatch) {
                     cleanLines.push(`Community discussion: ${pointsMatch ? pointsMatch[1] + ' points' : ''}${pointsMatch && commentsMatch ? ' • ' : ''}${commentsMatch ? commentsMatch[1] + ' comments' : ''}.`);
                 }
-                cleanLines.push('Tap "Summarize Full Link with API Key" above to read a complete multi-paragraph digest of the linked webpage.');
                 return {
                     excerpt: cleanLines.join(' '),
                     paragraphs: cleanLines,
@@ -3039,7 +3026,7 @@
             }
 
             if (paragraphs.length === 0) {
-                paragraphs.push('Tap "Summarize Full Link with API Key" above to generate a complete summary from the article URL.');
+                paragraphs.push('No detailed summary text provided in this feed item.');
             }
 
             const fullText = paragraphs.join(' ');
@@ -3452,9 +3439,8 @@
             }
 
             if (aiStatus) {
-                aiStatus.textContent = art.aiSummarized
-                    ? 'Full webpage summary generated with Gemini API'
-                    : 'Want a deeper summary from the linked webpage?';
+                aiStatus.textContent = '';
+                aiStatus.classList.add('hidden');
             }
 
             if (hlList) {
@@ -3584,7 +3570,6 @@
                             detail = errJson?.error?.message || detail;
                         } catch (_) {}
                         lastError = detail;
-                        // If key itself is invalid or referrer blocked, fail immediately with clear message
                         if (/API_KEY_INVALID|API key not valid|PERMISSION_DENIED|referer/i.test(detail)) {
                             throw new Error(detail);
                         }
@@ -3603,7 +3588,6 @@
                 }
             }
 
-            // If search grounding failed (e.g. free-tier tool limit), retry without tools
             if (useSearchTool) {
                 return callGeminiWithFallback(keyToUse, prompt, false);
             }
@@ -3621,9 +3605,10 @@
 
             if (!keyToUse) {
                 if (statusEl) {
-                    statusEl.innerHTML = `No API key saved yet. <button type="button" onclick="openSettingsModal()" class="underline font-extrabold text-violet-600 dark:text-violet-400">Add Gemini API Key in Settings</button>`;
+                    statusEl.innerHTML = `<button type="button" onclick="openSettingsModal()" class="underline font-extrabold text-violet-600 dark:text-violet-400">Add Gemini API Key in Settings</button>`;
+                    statusEl.classList.remove('hidden');
                 }
-                showToast('Please paste and save your Gemini API key in Settings first', true);
+                showToast('Please add your Gemini API key in Settings first', true);
                 return;
             }
 
@@ -3634,7 +3619,10 @@
                     btn.disabled = true;
                     btn.innerHTML = `<i class="ph-bold ph-spinner animate-spin"></i><span>Summarizing...</span>`;
                 }
-                if (statusEl) statusEl.textContent = 'Reading linked webpage & generating summary...';
+                if (statusEl) {
+                    statusEl.textContent = '';
+                    statusEl.classList.add('hidden');
+                }
 
                 const extractedPageText = await fetchWebpageTextViaProxy(art.link);
                 const contextBlock = extractedPageText
@@ -3657,11 +3645,12 @@
                 art.aiSummarized = true;
                 saveCachedArticles();
                 openArticleReader(art.id, true);
-                showToast('Full link summary generated');
+                showToast('AI summary generated');
             } catch (err) {
                 const cleanErr = (err.message || 'Request failed').slice(0, 140);
                 if (statusEl) {
-                    statusEl.innerHTML = `<span class="text-rose-600 dark:text-rose-400">Error: ${escapeXml(cleanErr)}</span> — <button type="button" onclick="openSettingsModal()" class="underline font-extrabold text-violet-600 dark:text-violet-400">Open Settings</button>`;
+                    statusEl.innerHTML = `Error: ${escapeXml(cleanErr)} — <button type="button" onclick="openSettingsModal()" class="underline font-extrabold text-violet-600 dark:text-violet-400">Settings</button>`;
+                    statusEl.classList.remove('hidden');
                 }
                 showToast(`Summary failed: ${cleanErr}`, true);
             } finally {
@@ -3793,7 +3782,7 @@
 
                 if (fb) {
                     fb.className = 'text-[11px] font-bold px-3 py-2 rounded-xl bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 safe-wrap';
-                    fb.textContent = '✓ Verified! Your Gemini API key is active and ready for link summaries & RSS discovery.';
+                    fb.textContent = '✓ Verified! Your Gemini API key is active and ready for AI summaries & RSS discovery.';
                 }
                 showToast('Gemini API Key verified!');
             } catch (err) {
@@ -4163,5 +4152,4 @@
         }
     </script>
 </body>
-</html>
-```
+        </html>
