@@ -1,0 +1,20 @@
+{
+"name": "PrismRSS — Colorful In-App Summary Reader",
+"short_name": "PrismRSS",
+"description": "A vibrant, distraction-free RSS summary reader with Card, Magazine, and Feed views, Tamil & English fonts, Portfolio & Stock watchlists, and Smart Offline Caching.",
+"start_url": "./index.html",
+"scope": "./",
+"display": "standalone",
+"orientation": "any",
+"background_color": "#081526",
+"theme_color": "#081526",
+"categories": ["news", "productivity", "finance"],
+"icons": [
+{
+"src": "./icon.svg",
+"sizes": "any",
+"type": "image/svg+xml",
+"purpose": "any maskable"
+}
+]
+}

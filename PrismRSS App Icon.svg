@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#c026d3"/>
+      <stop offset="50%" stop-color="#7c3aed"/>
+      <stop offset="100%" stop-color="#0284c7"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.28"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="116" fill="url(#bgGrad)"/>
+  <rect width="512" height="256" rx="116" fill="url(#shine)"/>
+  <!-- RSS Broadcast Waves -->
+  <circle cx="164" cy="348" r="34" fill="#ffffff"/>
+  <path d="M138 258 C218 258 254 294 254 374" fill="none" stroke="#ffffff" stroke-width="34" stroke-linecap="round"/>
+  <path d="M138 176 C268 176 336 244 336 374" fill="none" stroke="#ffffff" stroke-width="34" stroke-linecap="round"/>
+  <!-- Prism Sparkle -->
+  <path d="M372 104 L386 140 L422 154 L386 168 L372 204 L358 168 L322 154 L358 140 Z" fill="#fde047"/>
+</svg>
