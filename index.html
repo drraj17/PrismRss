@@ -2610,12 +2610,10 @@
             state.autoHideReadOnScroll = !state.autoHideReadOnScroll;
             localStorage.setItem('prism_autohide_read', String(state.autoHideReadOnScroll));
             updateAutoHideUI();
-            if (!state.autoHideReadOnScroll) {
-                renderApp();
-                showToast('Auto-hide read on scroll turned off');
-            } else {
-                showToast('Auto-hide read on scroll enabled');
-            }
+            renderApp();
+            showToast(state.autoHideReadOnScroll
+                ? 'Auto-hide read on scroll enabled'
+                : 'Auto-hide read on scroll turned off');
         }
 
         function updateAutoHideUI() {
@@ -2627,37 +2625,60 @@
         }
 
         function initScrollAutoHideListener() {
+            let scrollRafPending = false;
             window.addEventListener('scroll', () => {
-                const currentY = window.scrollY;
-                const scrollingDown = currentY > lastScrollY;
-                lastScrollY = currentY;
+                if (scrollRafPending) return;
+                scrollRafPending = true;
+                requestAnimationFrame(() => {
+                    scrollRafPending = false;
+                    const currentY = window.scrollY;
+                    const scrollingDown = currentY > lastScrollY + 2;
+                    lastScrollY = currentY;
 
-                if (!state.autoHideReadOnScroll || !scrollingDown) return;
-                if (state.activeTab === 'bookmarks') return;
+                    if (!state.autoHideReadOnScroll || !scrollingDown) return;
+                    if (state.activeTab === 'bookmarks') return;
+                    const readerModal = document.getElementById('reader-modal');
+                    if (readerModal && !readerModal.classList.contains('hidden')) return;
 
-                const headerHeight = 120;
-                const cards = document.querySelectorAll('#articles-container article[data-article-id]');
-                let newlyMarked = false;
+                    const headerEl = document.querySelector('header');
+                    const headerBottom = headerEl ? headerEl.getBoundingClientRect().bottom : 112;
+                    const cards = document.querySelectorAll('#articles-container article[data-article-id]');
+                    let newlyMarked = 0;
 
-                cards.forEach(card => {
-                    if (card.dataset.autoHidden === '1') return;
-                    const rect = card.getBoundingClientRect();
-                    const artId = card.dataset.articleId;
-                    if (!artId) return;
+                    cards.forEach(card => {
+                        if (card.dataset.autoHidden === '1') return;
+                        const rect = card.getBoundingClientRect();
+                        const artId = card.dataset.articleId;
+                        if (!artId) return;
 
-                    if (rect.bottom < headerHeight) {
-                        if (!state.readIds.has(artId)) {
-                            state.readIds.add(artId);
-                            newlyMarked = true;
+                        // Once the entire card has scrolled past the sticky header, mark read and collapse cleanly without scroll jump
+                        if (rect.bottom <= headerBottom - 6 && rect.height > 0) {
+                            const beforeTop = document.documentElement.scrollHeight;
+                            card.dataset.autoHidden = '1';
+                            card.style.display = 'none';
+                            const afterTop = document.documentElement.scrollHeight;
+                            const removedDelta = beforeTop - afterTop;
+                            if (removedDelta > 0) {
+                                window.scrollBy(0, -removedDelta);
+                                lastScrollY = window.scrollY;
+                            }
+
+                            if (!state.readIds.has(artId)) {
+                                state.readIds.add(artId);
+                            }
+                            newlyMarked++;
                         }
-                        card.dataset.autoHidden = '1';
-                        card.style.display = 'none';
+                    });
+
+                    if (newlyMarked > 0) {
+                        localStorage.setItem('prism_read_ids', JSON.stringify([...state.readIds]));
+                        const countLabel = document.getElementById('summary-count-label');
+                        if (countLabel) {
+                            const remaining = document.querySelectorAll('#articles-container article[data-article-id]:not([data-auto-hidden="1"])').length;
+                            countLabel.textContent = `${remaining} ${remaining === 1 ? 'summary' : 'summaries'}`;
+                        }
                     }
                 });
-
-                if (newlyMarked) {
-                    localStorage.setItem('prism_read_ids', JSON.stringify([...state.readIds]));
-                }
             }, { passive: true });
         }
 
@@ -3027,21 +3048,29 @@
             }
         }
 
+        let activePrefetchIds = new Set();
+
         function prefetchFullArticlesInBackground() {
             if (!navigator.onLine) return;
-            const candidates = getFilteredArticles()
-                .filter(a => a && a.link && !a.fullArticleFetched && !/news\.google\.com/i.test(a.link))
+            const visibleList = getFilteredArticles();
+            const candidates = [...visibleList, ...state.articles]
+                .filter(a => a && a.link && !a.fullArticleFetched && !activePrefetchIds.has(a.id) && !/news\.google\.com/i.test(a.link))
                 .sort((a, b) => (isSiteAutoFullArticleEnabled(b.source) ? 1 : 0) - (isSiteAutoFullArticleEnabled(a.source) ? 1 : 0))
-                .slice(0, 15);
+                .slice(0, 36);
             if (candidates.length === 0) return;
 
             let idx = 0;
-            const concurrency = 4;
+            const concurrency = 8;
             const worker = async () => {
                 while (idx < candidates.length) {
                     const art = candidates[idx++];
-                    if (art && !art.fullArticleFetched) {
-                        await fetchFullArticleWithReadability(art.id, true);
+                    if (art && !art.fullArticleFetched && !activePrefetchIds.has(art.id)) {
+                        activePrefetchIds.add(art.id);
+                        try {
+                            await fetchFullArticleWithReadability(art.id, true);
+                        } finally {
+                            activePrefetchIds.delete(art.id);
+                        }
                     }
                 }
             };
@@ -3538,7 +3567,7 @@
                 }
             }
 
-            if (state.unreadOnly && state.activeTab !== 'bookmarks') {
+            if ((state.unreadOnly || state.autoHideReadOnScroll) && state.activeTab !== 'bookmarks') {
                 list = list.filter(a => !state.readIds.has(a.id));
             }
             if (state.searchQuery) {
@@ -3574,6 +3603,8 @@
             } else {
                 renderCardView(container, filtered);
             }
+
+            prefetchFullArticlesInBackground();
         }
 
         function renderCardView(container, items) {
@@ -3911,13 +3942,20 @@
                         .join('');
                 }
             }
-            if (scrollBody) scrollBody.scrollTop = 0;
 
             updateReaderBookmarkIcon();
 
             const modal = document.getElementById('reader-modal');
             modal.classList.remove('hidden');
             modal.classList.add('flex');
+
+            if (scrollBody) {
+                scrollBody.scrollTop = 0;
+                requestAnimationFrame(() => {
+                    scrollBody.scrollTop = 0;
+                });
+            }
+
             renderApp();
 
             // Automatically fetch full article if remembered ON for this site OR if RSS feed only gave a short teaser
@@ -4109,16 +4147,16 @@
             };
 
             const tasks = [
-                fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(9500) })
+                fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(5500) })
                     .then(r => r.ok ? r.text() : Promise.reject())
                     .then(validateHtml),
-                fetch(`https://corsproxy.io/?url=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(9500) })
+                fetch(`https://corsproxy.io/?url=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(5500) })
                     .then(r => r.ok ? r.text() : Promise.reject())
                     .then(validateHtml),
-                fetch(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(9500) })
+                fetch(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(5500) })
                     .then(r => r.ok ? r.text() : Promise.reject())
                     .then(validateHtml),
-                fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(9500) })
+                fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(5500) })
                     .then(r => r.ok ? r.json() : Promise.reject())
                     .then(d => validateHtml(d.contents))
             ];
@@ -4138,7 +4176,7 @@
                         'Accept': 'text/plain',
                         'X-Remove-Selector': 'nav, header, footer, aside, .navbar, .menu, .mega-menu, .sidebar, .breadcrumb, .related-articles, .comments, .advertisement'
                     },
-                    signal: AbortSignal.timeout(8500)
+                    signal: AbortSignal.timeout(6500)
                 });
                 if (!res.ok) return null;
                 const md = await res.text();
