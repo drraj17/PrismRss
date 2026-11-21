@@ -1,4 +1,4 @@
-const CACHE_NAME = 'prismrss-pwa-v7';
+const CACHE_NAME = 'prismrss-pwa-v8';
 const APP_SHELL = [
   './',
   './index.html',
