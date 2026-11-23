@@ -778,7 +778,7 @@
                     </div>
                 </div>
 
-                <!-- 3.5. Gemini API Key (Auto-saves + Instant Test Key Button) -->
+                <!-- 3.5. Gemini API Key & Custom Proxy URL -->
                 <div class="p-4 rounded-2xl bg-gradient-to-br from-violet-500/8 via-fuchsia-500/8 to-indigo-500/8 border border-violet-300/50 dark:border-violet-700/50 space-y-2.5">
                     <div class="flex items-center justify-between">
                         <h3 class="text-xs font-extrabold uppercase tracking-wider text-violet-700 dark:text-violet-300 flex items-center gap-1.5">
@@ -806,6 +806,28 @@
                         </button>
                     </div>
                     <div id="api-key-test-feedback" class="hidden text-[11px] font-semibold px-3 py-2 rounded-xl safe-wrap"></div>
+
+                    <div class="pt-2.5 mt-2 border-t border-violet-300/30 dark:border-violet-700/30 space-y-2">
+                        <div class="flex items-center justify-between">
+                            <label for="custom-proxy-url-input" class="text-xs font-extrabold uppercase tracking-wider text-violet-700 dark:text-violet-300 flex items-center gap-1.5">
+                                <i class="ph-fill ph-globe text-sm"></i>
+                                <span>Custom Proxy URL</span>
+                            </label>
+                            <span id="custom-proxy-status-badge" class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300">Not Set</span>
+                        </div>
+                        <p class="text-[11px] text-slate-500 dark:text-slate-400">
+                            Optional Cloudflare Worker URL (e.g. https://your-worker.workers.dev) for fast, unthrottled RSS &amp; full-article fetching.
+                        </p>
+                        <div class="flex flex-wrap items-center gap-2">
+                            <input type="url" id="custom-proxy-url-input" oninput="handleCustomProxyLiveInput(this.value)" placeholder="https://your-worker.workers.dev" class="flex-1 min-w-[180px] px-3 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-violet-500">
+                            <button type="button" onclick="saveCustomProxySetting()" class="px-3.5 py-2 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-xs font-bold transition shrink-0">
+                                Save
+                            </button>
+                            <button type="button" onclick="clearCustomProxySetting()" class="px-2.5 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-500 hover:text-rose-500 text-xs font-bold transition shrink-0">
+                                Clear
+                            </button>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- 3.7. Permanent Databases -->
@@ -1099,6 +1121,8 @@
             lastSyncTs: parseInt(localStorage.getItem('prism_last_sync_ts') || '0', 10),
             autoHideReadOnScroll: localStorage.getItem('prism_autohide_read') !== 'false',
             apiKey: localStorage.getItem('prism_gemini_api_key') || '',
+            customProxyUrl: localStorage.getItem('prism_custom_proxy_url') || '',
+            failedFeeds: new Set(),
             activeDbEditor: 'portfolio',
             activeMoveMenuFeedIdx: null,
             activeTab: 'favorites',
@@ -1122,6 +1146,7 @@
             loadBookmarkedArticles();
             hydrateCachedArticles();
             updateApiKeyUI();
+            updateCustomProxyUI();
             applyAppFont(state.fontMode, false);
             applyTamilFont(state.tamilFontMode, false);
             applyEnFontSize(state.enFontSize, false);
@@ -2283,6 +2308,7 @@
                                 ` : catFeeds.map(({ feed, idx }) => {
                                     const isSelected = state.activeSource === feed.title;
                                     const isMoveOpen = state.activeMoveMenuFeedIdx === idx;
+                                    const isFailed = state.failedFeeds && state.failedFeeds.has(feed.url);
                                     return `
                                         <div draggable="true" ondragstart="handleFeedDragStart(${idx}, event)" ondragend="handleFeedDragEnd(event)" ondragover="handleFeedDragOverRow(${idx}, event)" ondrop="handleFeedDropOnRow(${idx}, '${escapeXml(catName)}', event)" onclick="selectMyFeedSource('${feed.title.replace(/'/g, "\\'")}'); closeSidebar();" class="cursor-pointer flex flex-col gap-1.5 px-2.5 py-2 rounded-xl border transition ${
                                             isSelected
@@ -2292,6 +2318,7 @@
                                             <div class="flex items-center justify-between gap-1.5">
                                                 <div class="flex items-center gap-1.5 min-w-0">
                                                     <span class="text-xs font-bold truncate">${feed.title}</span>
+                                                    ${isFailed ? `<span class="px-1.5 py-0.2 rounded text-[9px] font-extrabold uppercase bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300 shrink-0">failed</span>` : ''}
                                                 </div>
                                                 <div class="flex items-center gap-0.5 shrink-0" onclick="event.stopPropagation()">
                                                     <button type="button" onclick="toggleSiteMoveMenu(${idx}, event)" title="Move to Category" class="p-1 rounded-lg hover:bg-violet-100 dark:hover:bg-violet-950 ${isMoveOpen ? 'bg-violet-100 dark:bg-violet-950 text-violet-600' : 'text-slate-400 hover:text-violet-600'} transition">
@@ -2871,35 +2898,60 @@
                 return;
             }
 
+            // Stale-while-revalidate: render cached articles immediately before network fetch
+            if (state.articles.length === 0) {
+                hydrateCachedArticles();
+            }
+            if (state.articles.length > 0) {
+                if (['portfolio', 'mystocks', 'keywords'].includes(state.activeTab)) {
+                    hydrateSpecialTabView(state.activeTab);
+                }
+                renderApp();
+            }
+
             const icon = document.getElementById('refresh-icon');
             if (icon) icon.classList.add('animate-spin');
-            setStatusText(state.offlineMode && state.articles.length > 0
-                ? 'Smart Cache: Syncing feeds, stocks & keywords...'
+            setStatusText(state.articles.length > 0
+                ? 'Refreshing in background...'
                 : 'Updating India, global, stocks & keyword digests...');
 
             const existingMap = new Map();
-            if (state.offlineMode) {
-                state.articles.forEach(a => {
-                    if (a && a.id) existingMap.set(a.id, a);
-                });
-            }
+            state.articles.forEach(a => {
+                if (a && a.id) existingMap.set(a.id, a);
+            });
 
+            state.failedFeeds.clear();
             const allFetched = [];
+
+            // Concurrency-limited queue (max 5 feeds at a time)
+            const runFeedQueue = async (feedsList, concurrency = 5) => {
+                let idx = 0;
+                const worker = async () => {
+                    while (idx < feedsList.length) {
+                        const feed = feedsList[idx++];
+                        if (!feed) continue;
+                        const items = await fetchSingleFeedItems(feed);
+                        items.forEach(item => {
+                            if (state.offlineMode && existingMap.has(item.id)) {
+                                allFetched.push(existingMap.get(item.id));
+                            } else {
+                                allFetched.push(item);
+                            }
+                        });
+                    }
+                };
+                const workers = [];
+                const count = Math.min(concurrency, feedsList.length);
+                for (let i = 0; i < count; i++) workers.push(worker());
+                await Promise.all(workers);
+            };
+
             const [_, specialNewCount] = await Promise.all([
-                Promise.allSettled(state.feeds.map(async feed => {
-                    const items = await fetchSingleFeedItems(feed);
-                    items.forEach(item => {
-                        if (existingMap.has(item.id)) {
-                            allFetched.push(existingMap.get(item.id));
-                        } else {
-                            allFetched.push(item);
-                        }
-                    });
-                })),
+                runFeedQueue(state.feeds, 5),
                 syncAllSpecialTabs(manual)
             ]);
 
-            if (state.offlineMode) {
+            if (state.offlineMode || state.failedFeeds.size > 0) {
                 existingMap.forEach((cachedArt) => {
                     allFetched.push(cachedArt);
                 });
@@ -2940,10 +2992,15 @@
 
             if (icon) icon.classList.remove('animate-spin');
             updateOfflineUI();
+            renderSidebarFeeds();
             setStatusText(state.articles.length > 0 ? 'India-First Digest Ready' : 'No feeds loaded');
             renderApp();
             prefetchFullArticlesInBackground();
-            if (manual) {
+
+            const failedCount = state.failedFeeds.size;
+            if (failedCount > 0) {
+                showRetryToast(`${failedCount} ${failedCount === 1 ? 'feed' : 'feeds'} failed - tap to retry`, () => refreshAllFeeds(true));
+            } else if (manual) {
                 const totalNew = newlyAddedCount + (specialNewCount || 0);
                 showToast(state.offlineMode
                     ? `Synced: ${totalNew} new summaries added across feeds, stocks & keywords`
@@ -2956,31 +3013,47 @@
         function prefetchFullArticlesInBackground() {
             if (!navigator.onLine) return;
             const visibleList = getFilteredArticles();
-            const candidates = [...visibleList, ...state.articles]
-                .filter(a => a && a.link && !a.fullArticleFetched && !activePrefetchIds.has(a.id))
-                .sort((a, b) => (isSiteAutoFullArticleEnabled(b.source) ? 1 : 0) - (isSiteAutoFullArticleEnabled(a.source) ? 1 : 0))
-                .slice(0, 24);
-            if (candidates.length === 0) return;
+            const isEligible = (a) => a && a.link && !a.fullArticleFetched && !activePrefetchIds.has(a.id) &&
+                (!a.fullFetchFailedAt || (Date.now() - a.fullFetchFailedAt >= 10 * 60 * 1000));
 
-            let idx = 0;
-            const concurrency = 3;
-            const worker = async () => {
-                while (idx < candidates.length) {
-                    const art = candidates[idx++];
-                    if (art && !art.fullArticleFetched && !activePrefetchIds.has(art.id)) {
-                        activePrefetchIds.add(art.id);
-                        try {
-                            await fetchFullArticleWithReadability(art.id, true);
-                        } finally {
-                            activePrefetchIds.delete(art.id);
+            const topVisible = visibleList.filter(isEligible).slice(0, 12);
+            const topIds = new Set(topVisible.map(a => a.id));
+            const restCandidates = [...visibleList, ...state.articles]
+                .filter(a => isEligible(a) && !topIds.has(a.id))
+                .sort((a, b) => (isSiteAutoFullArticleEnabled(b.source) ? 1 : 0) - (isSiteAutoFullArticleEnabled(a.source) ? 1 : 0))
+                .slice(0, 16);
+
+            const runBatch = async (list, concurrency = 2) => {
+                if (list.length === 0) return;
+                let idx = 0;
+                const worker = async () => {
+                    while (idx < list.length) {
+                        const art = list[idx++];
+                        if (art && isEligible(art)) {
+                            activePrefetchIds.add(art.id);
+                            try {
+                                await fetchFullArticleWithReadability(art.id, true);
+                            } finally {
+                                activePrefetchIds.delete(art.id);
+                            }
+                            await new Promise(r => setTimeout(r, 200));
                         }
-                        await new Promise(r => setTimeout(r, 180));
                     }
+                };
+                const workers = [];
+                for (let i = 0; i < Math.min(concurrency, list.length); i++) {
+                    workers.push(worker());
                 }
+                await Promise.all(workers);
             };
-            for (let i = 0; i < concurrency; i++) {
-                setTimeout(() => worker(), i * 220);
-            }
+
+            runBatch(topVisible, 2).then(() => {
+                if (restCandidates.length === 0) return;
+                const scheduleIdle = window.requestIdleCallback || ((cb) => setTimeout(cb, 800));
+                scheduleIdle(() => {
+                    runBatch(restCandidates, 2);
+                });
+            });
         }
 
         function getSiteFullArticleKey(sourceName) {
@@ -3040,10 +3113,34 @@
         }
 
         async function fetchSingleFeedItems(feed) {
-            const proxyTasks = [
-                (async () => {
+            const getCachedForFeed = () => {
+                if (!feed || !feed.title) return [];
+                return state.articles.filter(a => (a.source || '').toLowerCase() === feed.title.toLowerCase());
+            };
+
+            const customProxy = (state.customProxyUrl || localStorage.getItem('prism_custom_proxy_url') || '').trim().replace(/\/+$/, '');
+            if (customProxy) {
+                for (let attempt = 0; attempt < 2; attempt++) {
+                    try {
+                        const res = await fetch(`${customProxy}?url=${encodeURIComponent(feed.url)}`, {
+                            signal: AbortSignal.timeout(9500)
+                        });
+                        if (res.ok) {
+                            const xmlText = await res.text();
+                            const parsed = parseRawXmlFeed(xmlText, feed);
+                            if (parsed.length > 0) {
+                                if (state.failedFeeds) state.failedFeeds.delete(feed.url);
+                                return parsed;
+                            }
+                        }
+                    } catch (_) {}
+                }
+            }
+
+            const proxyFetchers = [
+                async () => {
                     const r2jUrl = `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(feed.url)}`;
-                    const res = await fetch(r2jUrl, { signal: AbortSignal.timeout(6500) });
+                    const res = await fetch(r2jUrl, { signal: AbortSignal.timeout(9500) });
                     if (!res.ok) throw new Error('r2j_http');
                     const data = await res.json();
                     if (data.status === 'ok' && Array.isArray(data.items) && data.items.length > 0) {
@@ -3065,10 +3162,10 @@
                         });
                     }
                     throw new Error('r2j_empty');
-                })(),
-                (async () => {
+                },
+                async () => {
                     const aoUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(feed.url)}`;
-                    const res = await fetch(aoUrl, { signal: AbortSignal.timeout(7000) });
+                    const res = await fetch(aoUrl, { signal: AbortSignal.timeout(9500) });
                     if (!res.ok) throw new Error('ao_http');
                     const data = await res.json();
                     if (data && data.contents) {
@@ -3076,32 +3173,42 @@
                         if (parsed.length > 0) return parsed;
                     }
                     throw new Error('ao_empty');
-                })(),
-                (async () => {
+                },
+                async () => {
                     const ctUrl = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(feed.url)}`;
-                    const res = await fetch(ctUrl, { signal: AbortSignal.timeout(7000) });
+                    const res = await fetch(ctUrl, { signal: AbortSignal.timeout(9500) });
                     if (!res.ok) throw new Error('ct_http');
                     const xmlText = await res.text();
                     const parsed = parseRawXmlFeed(xmlText, feed);
                     if (parsed.length > 0) return parsed;
                     throw new Error('ct_empty');
-                })(),
-                (async () => {
+                },
+                async () => {
                     const cpUrl = `https://corsproxy.io/?url=${encodeURIComponent(feed.url)}`;
-                    const res = await fetch(cpUrl, { signal: AbortSignal.timeout(7000) });
+                    const res = await fetch(cpUrl, { signal: AbortSignal.timeout(9500) });
                     if (!res.ok) throw new Error('cp_http');
                     const xmlText = await res.text();
                     const parsed = parseRawXmlFeed(xmlText, feed);
                     if (parsed.length > 0) return parsed;
                     throw new Error('cp_empty');
-                })()
+                }
             ];
 
-            try {
-                return await Promise.any(proxyTasks);
-            } catch (_) {
-                return [];
+            for (let attempt = 0; attempt < 2; attempt++) {
+                for (let i = 0; i < proxyFetchers.length; i += 2) {
+                    const batch = proxyFetchers.slice(i, i + 2).map(fn => fn());
+                    try {
+                        const items = await Promise.any(batch);
+                        if (items && items.length > 0) {
+                            if (state.failedFeeds) state.failedFeeds.delete(feed.url);
+                            return items;
+                        }
+                    } catch (_) {}
+                }
             }
+
+            if (state.failedFeeds) state.failedFeeds.add(feed.url);
+            return getCachedForFeed();
         }
 
         function parseRawXmlFeed(xmlStr, feed) {
@@ -3864,7 +3971,8 @@
 
             const rawLen = (art.paragraphs || []).join(' ').length;
             const looksTruncated = rawLen < 900 || /(\.\.\.|\u2026|read more|continue reading)$/i.test(art.excerpt || '');
-            const shouldAutoFetch = siteAutoFull ? !art.fullRichBlocks : (!art.fullArticleFetched && looksTruncated);
+            const canRetryFailed = !art.fullFetchFailedAt || (Date.now() - art.fullFetchFailedAt >= 10 * 60 * 1000);
+            const shouldAutoFetch = siteAutoFull ? !art.fullRichBlocks : (!art.fullArticleFetched && canRetryFailed && looksTruncated);
 
             if (shouldAutoFetch && !art.aiSummarized && navigator.onLine && art.link) {
                 fetchFullArticleWithReadability(art.id, !siteAutoFull);
@@ -3969,22 +4077,20 @@
                     lbl.textContent = 'Loading Full...';
                 }
 
-                const tasks = [];
+                let structured = null;
                 if (!isGoogleNewsRedirect) {
-                    tasks.push((async () => {
-                        const html = await fetchRawPageHtmlViaProxy(targetUrl);
-                        const res = parseHtmlWithReadability(html, targetUrl, art.source);
-                        if (!res) throw new Error('html_parse_empty');
-                        return res;
-                    })());
+                    const html = await fetchRawPageHtmlViaProxy(targetUrl);
+                    structured = parseHtmlWithReadability(html, targetUrl, art.source);
                 }
-                tasks.push((async () => {
+                if (!structured) {
                     const res = await fetchViaHeadlessReaderProxy(targetUrl);
-                    if (!res || !res.paragraphs || res.paragraphs.length === 0) throw new Error('jina_empty');
-                    return res;
-                })());
-
-                const structured = await Promise.any(tasks);
+                    if (res && res.paragraphs && res.paragraphs.length > 0) {
+                        structured = res;
+                    }
+                }
+                if (!structured) {
+                    throw new Error('full_fetch_failed');
+                }
 
                 if (!art.imageUrl && (structured.ogImage || structured.firstImageUrl)) {
                     art.imageUrl = structured.ogImage || structured.firstImageUrl;
@@ -3994,6 +4100,7 @@
                 const origJoined = (art.paragraphs || []).join(' ');
 
                 art.fullArticleFetched = true;
+                delete art.fullFetchFailedAt;
 
                 if (fullJoined.length >= Math.max(120, origJoined.length * 0.7)) {
                     art.fullParagraphs = structured.paragraphs;
@@ -4015,7 +4122,7 @@
                     showToast('Feed already shows the complete article');
                 }
             } catch (err) {
-                art.fullArticleFetched = true;
+                art.fullFetchFailedAt = Date.now();
                 if (!isAutoBackground) {
                     showToast('Could not extract full page from this site', true);
                 }
@@ -4041,8 +4148,16 @@
             return rawUrl;
         }
 
+        const rawPageHtmlCache = new Map();
+        const headlessReaderCache = new Map();
+
         async function fetchRawPageHtmlViaProxy(url) {
             if (!url || /news\.google\.com/i.test(url)) return '';
+            const cached = rawPageHtmlCache.get(url);
+            if (cached && (Date.now() - cached.ts) < 5 * 60 * 1000) {
+                return cached.data;
+            }
+
             const validateHtml = (txt) => {
                 if (!txt || typeof txt !== 'string' || txt.length < 500) return Promise.reject();
                 if (/<title>\s*(Just a moment|Attention Required|Access Denied|403 Forbidden|Robot Check)/i.test(txt)) {
@@ -4051,151 +4166,209 @@
                 return txt;
             };
 
-            const tasks = [
-                fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(5000) })
+            const customProxy = (state.customProxyUrl || localStorage.getItem('prism_custom_proxy_url') || '').trim().replace(/\/+$/, '');
+            if (customProxy) {
+                for (let attempt = 0; attempt < 2; attempt++) {
+                    try {
+                        const res = await fetch(`${customProxy}?url=${encodeURIComponent(url)}`, {
+                            signal: AbortSignal.timeout(9500)
+                        });
+                        if (res.ok) {
+                            const txt = await validateHtml(await res.text());
+                            rawPageHtmlCache.set(url, { data: txt, ts: Date.now() });
+                            return txt;
+                        }
+                    } catch (_) {}
+                }
+            }
+
+            const proxyFetchers = [
+                () => fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(9500) })
                     .then(r => r.ok ? r.text() : Promise.reject())
                     .then(validateHtml),
-                fetch(`https://corsproxy.io/?url=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(5000) })
+                () => fetch(`https://corsproxy.io/?url=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(9500) })
                     .then(r => r.ok ? r.text() : Promise.reject())
                     .then(validateHtml),
-                fetch(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(5000) })
+                () => fetch(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(9500) })
                     .then(r => r.ok ? r.text() : Promise.reject())
                     .then(validateHtml),
-                fetch(`https://thingproxy.freeboard.io/fetch/${url}`, { signal: AbortSignal.timeout(5000) })
+                () => fetch(`https://thingproxy.freeboard.io/fetch/${url}`, { signal: AbortSignal.timeout(9500) })
                     .then(r => r.ok ? r.text() : Promise.reject())
                     .then(validateHtml),
-                fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(5500) })
+                () => fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(9500) })
                     .then(r => r.ok ? r.json() : Promise.reject())
                     .then(d => validateHtml(d.contents))
             ];
-            try {
-                return await Promise.any(tasks);
-            } catch (_) {
-                return '';
+
+            for (let attempt = 0; attempt < 2; attempt++) {
+                for (let i = 0; i < proxyFetchers.length; i += 2) {
+                    const batch = proxyFetchers.slice(i, i + 2).map(fn => fn());
+                    try {
+                        const txt = await Promise.any(batch);
+                        if (txt) {
+                            rawPageHtmlCache.set(url, { data: txt, ts: Date.now() });
+                            return txt;
+                        }
+                    } catch (_) {}
+                }
             }
+            return '';
         }
 
         async function fetchViaHeadlessReaderProxy(url) {
             if (!url) return null;
-            try {
-                const jinaUrl = `https://r.jina.ai/${url}`;
-                const res = await fetch(jinaUrl, {
-                    headers: {
-                        'Accept': 'text/plain',
-                        'X-Remove-Selector': 'nav, header, footer, aside, .navbar, .menu, .mega-menu, .sidebar, .breadcrumb, .related-articles, .comments, .advertisement'
-                    },
-                    signal: AbortSignal.timeout(6500)
-                });
-                if (!res.ok) return null;
-                const md = await res.text();
-                if (!md || md.length < 250) return null;
+            const cached = headlessReaderCache.get(url);
+            if (cached && (Date.now() - cached.ts) < 5 * 60 * 1000) {
+                return cached.data;
+            }
 
-                const contentStart = md.indexOf('Markdown Content:');
-                const bodyMd = contentStart !== -1 ? md.slice(contentStart + 'Markdown Content:'.length) : md;
-
-                const normalizedMd = decodeHtmlEntities(bodyMd)
-                    .replace(/<br\s*\/?>/gi, '\n')
-                    .replace(/<\/?(?:p|div|section|article|span|figure|figcaption)[^>]*>/gi, '\n')
-                    .replace(/^(.+)\n={3,}\s*$/gm, '## $1')
-                    .replace(/^(.+)\n-{3,}\s*$/gm, '### $1');
-
-                const lines = normalizedMd.split('\n').map(l => l.trim()).filter(Boolean);
-                const paragraphs = [];
-                const richBlocks = [];
-                const seen = new Set();
-                let firstImageUrl = '';
-
-                for (const line of lines) {
-                    if (/^([-*_]){3,}\s*$/.test(line)) continue;
-                    if (/^\|?[\s:-]+\|[\s|:-]*$/.test(line)) continue;
-                    if (/javascript:void\(0\)/i.test(line)) continue;
-                    if (/^(Title:|URL Source:|Published Time:|Warning:|Target URL:|\[Skip to|Sign in|Log in|Register|Subscribe|Advertisement|Follow us|Share this|Read more:|Also Read:|Related Stories|Trending|Most Popular|Comments)/i.test(line)) {
-                        continue;
-                    }
-
-                    const linkCount = (line.match(/\]\((?:https?:\/\/|javascript:|\/)/gi) || []).length;
-                    if (linkCount >= 3) continue;
-
-                    const imgMatch = line.match(/^(?:\[)?!\[([^\]]*)\]\((https?:\/\/[^\s)]+)(?:\s+"[^"]*")?\)(?:\]\([^)]+\))?\s*$/);
-                    if (imgMatch) {
-                        const validImg = sanitizeImageUrl(imgMatch[2], url);
-                        if (validImg && !seen.has(validImg)) {
-                            seen.add(validImg);
-                            if (!firstImageUrl) firstImageUrl = validImg;
-                            const rawCap = stripMarkdownToCleanText(imgMatch[1]).replace(/^Image\s*\d*:?\s*/i, '').trim();
-                            richBlocks.push(`
-                                <figure class="summary-figure">
-                                    <img src="${escapeXml(validImg)}" alt="${escapeXml(rawCap)}" loading="lazy" onerror="this.closest('figure').style.display='none'">
-                                    ${rawCap && rawCap.length > 4 ? `<figcaption class="summary-figcaption">${formatBilingualText(rawCap)}</figcaption>` : ''}
-                                </figure>
-                            `);
-                        }
-                        continue;
-                    }
-
-                    if (/^(?:[-*•]\s+)?\[[^\]]+\]\([^)]+\)\s*$/.test(line)) continue;
-                    if (/^\[[^\]]+\]\[\d+\]\s*$/.test(line)) continue;
-
-                    if (/^\|.+\|$/.test(line)) {
-                        const cells = line.slice(1, -1).split('|').map(c => stripMarkdownToCleanText(c)).filter(Boolean);
-                        if (cells.length >= 2) {
-                            const rowText = cells.join(' — ');
-                            if (!seen.has(rowText)) {
-                                seen.add(rowText);
-                                paragraphs.push(rowText);
-                                richBlocks.push(`<div class="px-3.5 py-2 rounded-xl bg-slate-100/80 dark:bg-slate-800/70 text-sm">${formatBilingualText(rowText)}</div>`);
+            const customProxy = (state.customProxyUrl || localStorage.getItem('prism_custom_proxy_url') || '').trim().replace(/\/+$/, '');
+            if (customProxy) {
+                for (let attempt = 0; attempt < 2; attempt++) {
+                    try {
+                        const res = await fetch(`${customProxy}?url=${encodeURIComponent(url)}`, {
+                            signal: AbortSignal.timeout(9500)
+                        });
+                        if (res.ok) {
+                            const html = await res.text();
+                            const parsed = parseHtmlWithReadability(html, url, '');
+                            if (parsed && parsed.paragraphs && parsed.paragraphs.length > 0) {
+                                const result = {
+                                    paragraphs: parsed.paragraphs,
+                                    richBlocks: parsed.richBlocks,
+                                    highlights: parsed.highlights,
+                                    firstImageUrl: parsed.ogImage || ''
+                                };
+                                headlessReaderCache.set(url, { data: result, ts: Date.now() });
+                                return result;
                             }
                         }
-                        continue;
-                    }
-
-                    if (/^#{1,4}\s+/.test(line)) {
-                        const hText = stripMarkdownToCleanText(line.replace(/^#{1,4}\s+/, ''));
-                        if (hText.length >= 4 && !seen.has(hText)) {
-                            seen.add(hText);
-                            paragraphs.push(hText);
-                            richBlocks.push(`<h3 class="summary-heading">${formatBilingualText(hText)}</h3>`);
-                        }
-                    } else if (/^>\s+/.test(line)) {
-                        const qRaw = line.replace(/^>\s+/, '').trim();
-                        const qPlain = stripMarkdownToCleanText(qRaw);
-                        if (qPlain.length >= 15 && !seen.has(qPlain)) {
-                            seen.add(qPlain);
-                            paragraphs.push(qPlain);
-                            richBlocks.push(`<blockquote class="summary-quote">${formatInlineRichMarkdown(qRaw, url)}</blockquote>`);
-                        }
-                    } else if (/^(?:[-*•]|\d+\.)\s+/.test(line)) {
-                        const bRaw = line.replace(/^(?:[-*•]|\d+\.)\s+/, '').trim();
-                        const plainB = stripMarkdownToCleanText(bRaw);
-                        if (plainB.length >= 15 && !seen.has(plainB)) {
-                            seen.add(plainB);
-                            paragraphs.push(plainB);
-                            richBlocks.push(`<div class="flex items-start gap-2.5"><span class="text-violet-500 font-extrabold mt-0.5">•</span><div>${formatInlineRichMarkdown(bRaw, url)}</div></div>`);
-                        }
-                    } else {
-                        const plainP = stripMarkdownToCleanText(line);
-                        if (plainP.length >= 35 && !seen.has(plainP)) {
-                            seen.add(plainP);
-                            paragraphs.push(plainP);
-                            richBlocks.push(`<p>${formatInlineRichMarkdown(line, url)}</p>`);
-                        }
-                    }
+                    } catch (_) {}
                 }
-
-                if (paragraphs.length === 0) return null;
-                const fullText = paragraphs.join(' ');
-                const sentences = fullText.match(/[^.!?]+[.!?]+/g) || paragraphs;
-                const highlights = sentences.map(s => s.trim()).filter(s => s.length >= 25 && s.length <= 240).slice(0, 3);
-
-                return {
-                    paragraphs,
-                    richBlocks,
-                    highlights: highlights.length > 0 ? highlights : [paragraphs[0]],
-                    firstImageUrl
-                };
-            } catch (_) {
-                return null;
             }
+
+            for (let attempt = 0; attempt < 2; attempt++) {
+                try {
+                    const jinaUrl = `https://r.jina.ai/${url}`;
+                    const res = await fetch(jinaUrl, {
+                        headers: {
+                            'Accept': 'text/plain',
+                            'X-Remove-Selector': 'nav, header, footer, aside, .navbar, .menu, .mega-menu, .sidebar, .breadcrumb, .related-articles, .comments, .advertisement'
+                        },
+                        signal: AbortSignal.timeout(9500)
+                    });
+                    if (!res.ok) continue;
+                    const md = await res.text();
+                    if (!md || md.length < 250) continue;
+
+                    const contentStart = md.indexOf('Markdown Content:');
+                    const bodyMd = contentStart !== -1 ? md.slice(contentStart + 'Markdown Content:'.length) : md;
+
+                    const normalizedMd = decodeHtmlEntities(bodyMd)
+                        .replace(/<br\s*\/?>/gi, '\n')
+                        .replace(/<\/?(?:p|div|section|article|span|figure|figcaption)[^>]*>/gi, '\n')
+                        .replace(/^(.+)\n={3,}\s*$/gm, '## $1')
+                        .replace(/^(.+)\n-{3,}\s*$/gm, '### $1');
+
+                    const lines = normalizedMd.split('\n').map(l => l.trim()).filter(Boolean);
+                    const paragraphs = [];
+                    const richBlocks = [];
+                    const seen = new Set();
+                    let firstImageUrl = '';
+
+                    for (const line of lines) {
+                        if (/^([-*_]){3,}\s*$/.test(line)) continue;
+                        if (/^\|?[\s:-]+\|[\s|:-]*$/.test(line)) continue;
+                        if (/javascript:void\(0\)/i.test(line)) continue;
+                        if (/^(Title:|URL Source:|Published Time:|Warning:|Target URL:|\[Skip to|Sign in|Log in|Register|Subscribe|Advertisement|Follow us|Share this|Read more:|Also Read:|Related Stories|Trending|Most Popular|Comments)/i.test(line)) {
+                            continue;
+                        }
+
+                        const linkCount = (line.match(/\]\((?:https?:\/\/|javascript:|\/)/gi) || []).length;
+                        if (linkCount >= 3) continue;
+
+                        const imgMatch = line.match(/^(?:\[)?!\[([^\]]*)\]\((https?:\/\/[^\s)]+)(?:\s+"[^"]*")?\)(?:\]\([^)]+\))?\s*$/);
+                        if (imgMatch) {
+                            const validImg = sanitizeImageUrl(imgMatch[2], url);
+                            if (validImg && !seen.has(validImg)) {
+                                seen.add(validImg);
+                                if (!firstImageUrl) firstImageUrl = validImg;
+                                const rawCap = stripMarkdownToCleanText(imgMatch[1]).replace(/^Image\s*\d*:?\s*/i, '').trim();
+                                richBlocks.push(`
+                                    <figure class="summary-figure">
+                                        <img src="${escapeXml(validImg)}" alt="${escapeXml(rawCap)}" loading="lazy" onerror="this.closest('figure').style.display='none'">
+                                        ${rawCap && rawCap.length > 4 ? `<figcaption class="summary-figcaption">${formatBilingualText(rawCap)}</figcaption>` : ''}
+                                    </figure>
+                                `);
+                            }
+                            continue;
+                        }
+
+                        if (/^(?:[-*•]\s+)?\[[^\]]+\]\([^)]+\)\s*$/.test(line)) continue;
+                        if (/^\[[^\]]+\]\[\d+\]\s*$/.test(line)) continue;
+
+                        if (/^\|.+\|$/.test(line)) {
+                            const cells = line.slice(1, -1).split('|').map(c => stripMarkdownToCleanText(c)).filter(Boolean);
+                            if (cells.length >= 2) {
+                                const rowText = cells.join(' — ');
+                                if (!seen.has(rowText)) {
+                                    seen.add(rowText);
+                                    paragraphs.push(rowText);
+                                    richBlocks.push(`<div class="px-3.5 py-2 rounded-xl bg-slate-100/80 dark:bg-slate-800/70 text-sm">${formatBilingualText(rowText)}</div>`);
+                                }
+                            }
+                            continue;
+                        }
+
+                        if (/^#{1,4}\s+/.test(line)) {
+                            const hText = stripMarkdownToCleanText(line.replace(/^#{1,4}\s+/, ''));
+                            if (hText.length >= 4 && !seen.has(hText)) {
+                                seen.add(hText);
+                                paragraphs.push(hText);
+                                richBlocks.push(`<h3 class="summary-heading">${formatBilingualText(hText)}</h3>`);
+                            }
+                        } else if (/^>\s+/.test(line)) {
+                            const qRaw = line.replace(/^>\s+/, '').trim();
+                            const qPlain = stripMarkdownToCleanText(qRaw);
+                            if (qPlain.length >= 15 && !seen.has(qPlain)) {
+                                seen.add(qPlain);
+                                paragraphs.push(qPlain);
+                                richBlocks.push(`<blockquote class="summary-quote">${formatInlineRichMarkdown(qRaw, url)}</blockquote>`);
+                            }
+                        } else if (/^(?:[-*•]|\d+\.)\s+/.test(line)) {
+                            const bRaw = line.replace(/^(?:[-*•]|\d+\.)\s+/, '').trim();
+                            const plainB = stripMarkdownToCleanText(bRaw);
+                            if (plainB.length >= 15 && !seen.has(plainB)) {
+                                seen.add(plainB);
+                                paragraphs.push(plainB);
+                                richBlocks.push(`<div class="flex items-start gap-2.5"><span class="text-violet-500 font-extrabold mt-0.5">•</span><div>${formatInlineRichMarkdown(bRaw, url)}</div></div>`);
+                            }
+                        } else {
+                            const plainP = stripMarkdownToCleanText(line);
+                            if (plainP.length >= 35 && !seen.has(plainP)) {
+                                seen.add(plainP);
+                                paragraphs.push(plainP);
+                                richBlocks.push(`<p>${formatInlineRichMarkdown(line, url)}</p>`);
+                            }
+                        }
+                    }
+
+                    if (paragraphs.length === 0) continue;
+                    const fullText = paragraphs.join(' ');
+                    const sentences = fullText.match(/[^.!?]+[.!?]+/g) || paragraphs;
+                    const highlights = sentences.map(s => s.trim()).filter(s => s.length >= 25 && s.length <= 240).slice(0, 3);
+
+                    const result = {
+                        paragraphs,
+                        richBlocks,
+                        highlights: highlights.length > 0 ? highlights : [paragraphs[0]],
+                        firstImageUrl
+                    };
+                    headlessReaderCache.set(url, { data: result, ts: Date.now() });
+                    return result;
+                } catch (_) {}
+            }
+            return null;
         }
 
         function navigateReader(delta, event) {
@@ -4494,6 +4667,7 @@
             const expCount = document.getElementById('export-count');
             if (expCount) expCount.textContent = state.feeds.length;
             updateApiKeyUI();
+            updateCustomProxyUI();
             updateOfflineUI();
             updateViewButtons();
             applyAppFont(state.fontMode, false);
@@ -4544,6 +4718,60 @@
                     badge.className = 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300';
                 }
             }
+        }
+
+        function handleCustomProxyLiveInput(val) {
+            state.customProxyUrl = (val || '').trim();
+            if (state.customProxyUrl) {
+                localStorage.setItem('prism_custom_proxy_url', state.customProxyUrl);
+            } else {
+                localStorage.removeItem('prism_custom_proxy_url');
+            }
+            const badge = document.getElementById('custom-proxy-status-badge');
+            if (badge) {
+                if (state.customProxyUrl) {
+                    badge.textContent = 'Saved';
+                    badge.className = 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300';
+                } else {
+                    badge.textContent = 'Not Set';
+                    badge.className = 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300';
+                }
+            }
+        }
+
+        function updateCustomProxyUI() {
+            const input = document.getElementById('custom-proxy-url-input');
+            const badge = document.getElementById('custom-proxy-status-badge');
+            if (input) input.value = state.customProxyUrl || '';
+            if (badge) {
+                if (state.customProxyUrl) {
+                    badge.textContent = 'Saved';
+                    badge.className = 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300';
+                } else {
+                    badge.textContent = 'Not Set';
+                    badge.className = 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300';
+                }
+            }
+        }
+
+        function saveCustomProxySetting() {
+            const input = document.getElementById('custom-proxy-url-input');
+            if (!input) return;
+            state.customProxyUrl = input.value.trim();
+            if (state.customProxyUrl) {
+                localStorage.setItem('prism_custom_proxy_url', state.customProxyUrl);
+            } else {
+                localStorage.removeItem('prism_custom_proxy_url');
+            }
+            updateCustomProxyUI();
+            showToast(state.customProxyUrl ? 'Custom Proxy URL saved locally' : 'Custom Proxy URL cleared');
+        }
+
+        function clearCustomProxySetting() {
+            state.customProxyUrl = '';
+            localStorage.removeItem('prism_custom_proxy_url');
+            updateCustomProxyUI();
+            showToast('Custom Proxy URL removed');
         }
 
         function toggleApiKeyVisibility() {
@@ -4977,6 +5205,25 @@
                 toast.style.transform = 'translateY(6px)';
                 setTimeout(() => toast.remove(), 300);
             }, 2600);
+        }
+
+        function showRetryToast(msg, onRetry) {
+            const container = document.getElementById('toast-container');
+            if (!container) return;
+            const toast = document.createElement('button');
+            toast.type = 'button';
+            toast.className = 'pointer-events-auto cursor-pointer px-4 py-2.5 rounded-2xl text-xs font-extrabold shadow-lg text-white bg-rose-600 hover:bg-rose-500 transition-all duration-300 text-left';
+            toast.textContent = msg;
+            toast.onclick = () => {
+                toast.remove();
+                if (typeof onRetry === 'function') onRetry();
+            };
+            container.appendChild(toast);
+            setTimeout(() => {
+                toast.style.opacity = '0';
+                toast.style.transform = 'translateY(6px)';
+                setTimeout(() => toast.remove(), 300);
+            }, 5000);
         }
     </script>
 </body>
