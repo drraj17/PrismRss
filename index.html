@@ -1137,7 +1137,7 @@
             readerQueue: []
         };
 
-        window.addEventListener('DOMContentLoaded', () => {
+        window.addEventListener('DOMContentLoaded', async () => {
             initTheme();
             initReaderSwipeGestures();
             initScrollAutoHideListener();
@@ -1160,6 +1160,8 @@
             renderCustomPinnedTabs();
             updateTabUI();
             renderApp();
+            idbReadyPromise = hydrateArticlesFromIDB();
+            await idbReadyPromise;
             if (shouldAutoSyncNow()) {
                 refreshAllFeeds(false);
             } else {
@@ -1278,7 +1280,7 @@
                 const cached = localStorage.getItem('prism_cached_articles');
                 if (cached) {
                     const parsed = JSON.parse(cached);
-                    if (Array.isArray(parsed) && parsed.length > 0) {
+                    if (Array.isArray(parsed) && parsed.length > state.articles.length) {
                         state.articles = parsed;
                         setStatusText(navigator.onLine ? 'Cached Digest Ready' : 'Offline • Showing Saved Summaries');
                     }
@@ -1297,7 +1299,65 @@
             } catch (_) {}
         }
 
+        // ---- Large article archive in IndexedDB (localStorage is too small for history) ----
+        const MAX_STORED_ARTICLES = 2000;
+        let idbReadyPromise = Promise.resolve();
+
+        function idbOpen() {
+            return new Promise((resolve) => {
+                try {
+                    if (!window.indexedDB) return resolve(null);
+                    const req = indexedDB.open('prism_rss', 1);
+                    req.onupgradeneeded = () => req.result.createObjectStore('kv');
+                    req.onsuccess = () => resolve(req.result);
+                    req.onerror = () => resolve(null);
+                    req.onblocked = () => resolve(null);
+                } catch (_) { resolve(null); }
+            });
+        }
+
+        async function idbGet(key) {
+            const db = await idbOpen();
+            if (!db) return null;
+            return new Promise((resolve) => {
+                try {
+                    const q = db.transaction('kv', 'readonly').objectStore('kv').get(key);
+                    q.onsuccess = () => resolve(q.result || null);
+                    q.onerror = () => resolve(null);
+                } catch (_) { resolve(null); }
+            });
+        }
+
+        async function idbSet(key, val) {
+            const db = await idbOpen();
+            if (!db) return false;
+            return new Promise((resolve) => {
+                try {
+                    const tx = db.transaction('kv', 'readwrite');
+                    tx.objectStore('kv').put(val, key);
+                    tx.oncomplete = () => resolve(true);
+                    tx.onerror = () => resolve(false);
+                    tx.onabort = () => resolve(false);
+                } catch (_) { resolve(false); }
+            });
+        }
+
+        async function hydrateArticlesFromIDB() {
+            try {
+                const raw = await idbGet('articles');
+                if (!raw) return;
+                const arr = JSON.parse(raw);
+                if (Array.isArray(arr) && arr.length > state.articles.length) {
+                    state.articles = arr;
+                    renderApp();
+                }
+            } catch (_) {}
+        }
+
         function saveCachedArticles() {
+            try {
+                idbSet('articles', JSON.stringify(state.articles.slice(0, MAX_STORED_ARTICLES)));
+            } catch (_) {}
             try {
                 localStorage.setItem('prism_cached_articles', JSON.stringify(state.articles.slice(0, 220)));
                 localStorage.setItem('prism_special_cache', JSON.stringify({
@@ -2886,6 +2946,7 @@
         }
 
         async function refreshAllFeeds(manual = false) {
+            await idbReadyPromise;
             updateOfflineUI();
             if (!navigator.onLine) {
                 hydrateCachedArticles();
@@ -2951,11 +3012,10 @@
                 syncAllSpecialTabs(manual)
             ]);
 
-            if (state.offlineMode || state.failedFeeds.size > 0) {
-                existingMap.forEach((cachedArt) => {
-                    allFetched.push(cachedArt);
-                });
-            }
+            // Always keep previously downloaded summaries (fresh copies win in dedupe below)
+            existingMap.forEach((cachedArt) => {
+                allFetched.push(cachedArt);
+            });
 
             const seenIds = new Set();
             let newlyAddedCount = 0;
@@ -2973,6 +3033,8 @@
                 const bScore = b.timestamp + (b.isIndia ? sixHoursMs : 0);
                 return bScore - aScore;
             });
+
+            if (deduped.length > MAX_STORED_ARTICLES) deduped.length = MAX_STORED_ARTICLES;
 
             if (deduped.length > 0) {
                 const liveIds = new Set(deduped.map(d => d.id));
@@ -5227,4 +5289,4 @@
         }
     </script>
 </body>
-</html>
+    </html>
